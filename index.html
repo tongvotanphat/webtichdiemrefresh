@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quản Trị Tích Điểm (Firebase)</title>
+    <title>Hệ Thống Tích Điểm Thành Viên</title>
 
     <!-- CDN cho thư viện tạo mã QR -->
     <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
@@ -11,15 +11,15 @@
     <!-- CDN cho thư viện xuất Excel (SheetJS) -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-    <!-- === FIREBASE SDKs (MỚI) === -->
+    <!-- === FIREBASE SDKs (Chung) === -->
     <script type="module">
         // Import các hàm cần thiết từ Firebase
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { 
             getAuth, 
             onAuthStateChanged,
-            signInWithEmailAndPassword, // MỚI: Dùng để đăng nhập
-            signOut // MỚI: Dùng để đăng xuất
+            signInWithEmailAndPassword,
+            signOut 
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { 
             getFirestore, 
@@ -32,11 +32,12 @@
             deleteDoc, 
             onSnapshot,
             query,
+            where, // Thêm 'where' cho tra cứu
             writeBatch
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // === BƯỚC 1: DÁN KHÓA (CONFIG) CỦA BẠN VÀO ĐÂY ===
-        // Lấy config này từ dự án Firebase của riêng bạn
+        // === KHÓA (CONFIG) CỦA DỰ ÁN ===
+        // Đây là khóa của dự án "webtichdiem" của bạn
         const firebaseConfig = {
           apiKey: "AIzaSyBlQDKw1sp3AGApHwktlgjmHHSgFiB9nPQ",
           authDomain: "webtichdiem.firebaseapp.com",
@@ -50,15 +51,165 @@
 
         // === BẮT ĐẦU LOGIC CHÍNH ===
         document.addEventListener('DOMContentLoaded', async () => {
-            // Lấy các phần tử DOM
-            const loginOverlay = document.getElementById('login-overlay');
-            const loginForm = document.getElementById('login-form');
-            const loginEmail = document.getElementById('login-email');
-            const loginPassword = document.getElementById('login-password');
-            const loginError = document.getElementById('login-error');
-            const appContainer = document.getElementById('app-container');
-            const logoutBtn = document.getElementById('logout-btn');
-            const userEmailDisplay = document.getElementById('user-email');
+            
+            // === KHỞI TẠO FIREBASE (Chung) ===
+            let db, auth, membersCollectionRef;
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                
+                // Đường dẫn CÔNG KHAI (Chung cho cả admin và member)
+                const collectionPath = `/artifacts/webtichdiem/public/data/members`;
+                membersCollectionRef = collection(db, collectionPath);
+                
+                console.log("Firebase initialized (Combined App).");
+            } catch (error) {
+                console.error('Error initializing Firebase:', error);
+                document.body.innerHTML = '<h1>Lỗi kết nối Firebase. Vui lòng tải lại trang.</h1>';
+                return;
+            }
+
+            // === Lấy các MÀN HÌNH (Screens) ===
+            const roleScreen = document.getElementById('role-selection-screen');
+            const adminLoginScreen = document.getElementById('admin-login-screen');
+            const adminAppScreen = document.getElementById('admin-app-screen');
+            const memberScreen = document.getElementById('member-search-screen');
+            
+            // Nút chung
+            const backButtons = document.querySelectorAll('.btn-back-to-role');
+
+            // === HÀM CHUYỂN MÀN HÌNH ===
+            function showScreen(screenToShow) {
+                // Ẩn tất cả
+                roleScreen.style.display = 'none';
+                adminLoginScreen.style.display = 'none';
+                adminAppScreen.style.display = 'none';
+                memberScreen.style.display = 'none';
+                
+                // Hiện màn hình mong muốn
+                screenToShow.style.display = 'flex'; // Dùng flex để căn giữa
+            }
+
+            // === LOGIC CHỌN VAI TRÒ (Role Selection) ===
+            document.getElementById('role-btn-member').addEventListener('click', () => {
+                showScreen(memberScreen);
+                // Khởi tạo logic tra cứu thành viên (nếu cần)
+                initializeMemberSearch();
+            });
+            
+            document.getElementById('role-btn-admin').addEventListener('click', () => {
+                // Kiểm tra xem có đang đăng nhập sẵn không
+                if (auth.currentUser) {
+                    showScreen(adminAppScreen);
+                    initializeAdminApp(); // Khởi tạo app admin nếu đã đăng nhập
+                } else {
+                    showScreen(adminLoginScreen);
+                }
+            });
+
+            // Nút quay lại
+            backButtons.forEach(btn => {
+                btn.addEventListener('click', () => showScreen(roleScreen));
+            });
+
+            // ===========================================
+            // === LOGIC CỦA THÀNH VIÊN (TRA CỨU) ===
+            // ===========================================
+            
+            const memberSearchInput = document.getElementById('member-search-input');
+            const memberSearchBtn = document.getElementById('member-search-btn');
+            const memberResultsContainer = document.getElementById('member-results-container');
+            const memberLoadingIndicator = document.getElementById('member-loading-indicator');
+            const memberResultsCard = document.getElementById('member-results-card');
+
+            async function searchMember() {
+                const searchTerm = memberSearchInput.value.trim();
+                if (!searchTerm) {
+                    alert('Vui lòng nhập SĐT hoặc Mã số để tra cứu.');
+                    return;
+                }
+                
+                memberLoadingIndicator.style.display = 'block';
+                memberResultsContainer.innerHTML = '';
+                memberSearchBtn.disabled = true;
+                memberResultsCard.style.display = 'block'; // Hiện card kết quả
+                
+                let foundMembers = [];
+
+                try {
+                    // 1. Tìm theo Số Điện Thoại
+                    const phoneQuery = query(membersCollectionRef, where("phone", "==", searchTerm));
+                    const phoneSnapshot = await getDocs(phoneQuery);
+                    phoneSnapshot.forEach(doc => {
+                        foundMembers.push(doc.data());
+                    });
+
+                    // 2. Nếu không thấy, tìm theo Mã Số
+                    if (foundMembers.length === 0) {
+                        const codeQuery = query(membersCollectionRef, where("memberCode", "==", searchTerm));
+                        const codeSnapshot = await getDocs(codeQuery);
+                        codeSnapshot.forEach(doc => {
+                            foundMembers.push(doc.data());
+                        });
+                    }
+                    
+                    // 3. Hiển thị kết quả
+                    if (foundMembers.length === 0) {
+                        memberResultsContainer.innerHTML = '<p class="no-results">Không tìm thấy thành viên nào khớp với thông tin của bạn.</p>';
+                    } else {
+                        foundMembers.forEach(member => {
+                            const memberCardHTML = `
+                                <div class="member-card">
+                                    <h3>${member.name}</h3>
+                                    <p><strong>Điện thoại:</strong> ${member.phone || 'N/A'}</p>
+                                    <p><strong>Mã số:</strong> ${member.memberCode}</p>
+                                    <div class="points-display">
+                                        <span>Điểm của bạn:</span>
+                                        <strong>${member.points}</strong>
+                                    </div>
+                                </div>
+                            `;
+                            memberResultsContainer.innerHTML += memberCardHTML;
+                        });
+                    }
+                } catch (error) {
+                    console.error("Error searching members: ", error);
+                    memberResultsContainer.innerHTML = '<p class="error">Đã xảy ra lỗi khi tìm kiếm.</p>';
+                } finally {
+                    memberLoadingIndicator.style.display = 'none';
+                    memberSearchBtn.disabled = false;
+                }
+            }
+
+            function initializeMemberSearch() {
+                // Gắn sự kiện (chỉ 1 lần)
+                if (!memberSearchBtn.dataset.initialized) {
+                    memberSearchBtn.addEventListener('click', searchMember);
+                    memberSearchInput.addEventListener('keyup', (e) => {
+                        if (e.key === 'Enter') searchMember();
+                    });
+                    memberSearchBtn.dataset.initialized = 'true';
+                }
+                // Reset
+                memberSearchInput.value = '';
+                memberResultsContainer.innerHTML = '<p class="no-results" style="color: #aaa;">Vui lòng nhập thông tin để tra cứu.</p>';
+                memberResultsCard.style.display = 'none';
+            }
+
+
+            // ===========================================
+            // === LOGIC CỦA QUẢN TRỊ VIÊN (ADMIN APP) ===
+            // ===========================================
+
+            // Lấy các phần tử DOM của Admin
+            const adminLoginForm = document.getElementById('admin-login-form');
+            const adminLoginEmail = document.getElementById('admin-login-email');
+            const adminLoginPassword = document.getElementById('admin-login-password');
+            const adminLoginError = document.getElementById('admin-login-error');
+            
+            const adminLogoutBtn = document.getElementById('admin-logout-btn');
+            const adminUserEmailDisplay = document.getElementById('admin-user-email');
 
             const addBtn = document.getElementById('add-btn');
             const nameInput = document.getElementById('name');
@@ -79,78 +230,51 @@
             const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
             const confirmOkBtn = document.getElementById('confirm-ok-btn');
             const formCancelBtn = document.getElementById('form-cancel-btn');
+            const loadingMessage = document.getElementById('loading-message');
 
             let localMembers = []; 
             let onConfirmAction = () => {};
             let editingMemberId = null; 
-            
-            let db, auth;
-            let membersCollectionRef; 
             let unsubscribeMembers = () => {};
-            let currentUserId = null; // MỚI
-            let currentAppId = null; // MỚI
-            
-            // --- HÀM KHỞI TẠO FIREBASE (CẬP NHẬT) ---
-            async function initializeFirebase() {
-                try {
-                    // 1. KIỂM TRA CONFIG
-                    if (firebaseConfig.apiKey === "YOUR_API_KEY") {
-                        alert('Lỗi: Bạn chưa cập nhật "firebaseConfig" trong code. Hãy làm theo hướng dẫn.');
-                        loginOverlay.innerHTML = '<h1>Lỗi Cấu Hình Firebase</h1>';
-                        loginOverlay.style.display = 'flex';
-                        return;
+            let isAdminAppInitialized = false;
+
+            // --- Theo dõi trạng thái Đăng nhập (Chung) ---
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    // --- ĐÃ ĐĂNG NHẬP ---
+                    console.log('Firebase Authenticated. User ID:', user.uid);
+                    adminUserEmailDisplay.textContent = user.email;
+                    
+                    // Chỉ hiển thị app admin nếu người dùng đã chọn vai trò admin
+                    if (adminAppScreen.style.display === 'flex' || adminLoginScreen.style.display === 'flex') {
+                        showScreen(adminAppScreen);
+                        initializeAdminApp();
                     }
+                } else {
+                    // --- ĐÃ ĐĂNG XUẤT ---
+                    console.log('Firebase not authenticated.');
                     
-                    // 2. KHỞI TẠO APP
-                    const app = initializeApp(firebaseConfig);
-                    auth = getAuth(app);
-                    db = getFirestore(app);
+                    // Ngắt kết nối real-time
+                    unsubscribeMembers();
+                    isAdminAppInitialized = false; 
                     
-                    // 3. THEO DÕI TRẠNG THÁI ĐĂNG NHẬP
-                    onAuthStateChanged(auth, (user) => {
-                        if (user) {
-                            // --- ĐÃ ĐĂNG NHẬP ---
-                            currentUserId = user.uid;
-                            // Dùng Project ID làm App ID (để đồng bộ)
-                            currentAppId = firebaseConfig.projectId; 
-                            console.log('Firebase Authenticated. User ID:', user.uid);
-                            userEmailDisplay.textContent = user.email;
-
-                            // Ẩn login, hiện app
-                            loginOverlay.style.display = 'none';
-                            appContainer.style.display = 'block';
-
-                            // Đường dẫn CÔNG KHAI
-                            const collectionPath = `/artifacts/${currentAppId}/public/data/members`;
-                            membersCollectionRef = collection(db, collectionPath);
-                            
-                            startRealtimeListener();
-                        } else {
-                            // --- ĐÃ ĐĂNG XUẤT ---
-                            currentUserId = null;
-                            currentAppId = null;
-                            console.log('Firebase not authenticated.');
-                            
-                            // Ẩn app, hiện login
-                            loginOverlay.style.display = 'flex';
-                            appContainer.style.display = 'none';
-
-                            unsubscribeMembers(); // Ngắt kết nối
-                        }
-                    });
-
-                } catch (error) {
-                    console.error('Error initializing Firebase:', error);
-                    alert('Lỗi nghiêm trọng khi kết nối với Firebase: ' + error.message);
+                    // Nếu đang ở màn hình admin, quay về màn hình chọn vai trò
+                    if (adminAppScreen.style.display === 'flex') {
+                        showScreen(roleScreen);
+                    }
                 }
-            }
-            
-            // --- HÀM LẮNG NGHE REAL-TIME (Giữ nguyên) ---
+            });
+
+            // --- HÀM LẮNG NGHE REAL-TIME (Admin) ---
             function startRealtimeListener() {
-                unsubscribeMembers();
+                unsubscribeMembers(); // Hủy listener cũ
                 const q = query(membersCollectionRef);
                 
+                loadingMessage.style.display = 'block';
+                loadingMessage.textContent = 'Đang kết nối với database...';
+                
                 unsubscribeMembers = onSnapshot(q, (snapshot) => {
+                    loadingMessage.style.display = 'none';
                     localMembers = []; 
                     snapshot.forEach((doc) => {
                         localMembers.push({ 
@@ -162,12 +286,11 @@
                     renderMembers(localMembers);
                 }, (error) => {
                     console.error("Error listening to members:", error);
-                    memberList.innerHTML = '<tr><td colspan="7" style="text-align:center; color:red;">Lỗi khi tải dữ liệu.</td></tr>';
+                    loadingMessage.textContent = 'Lỗi khi tải dữ liệu. Vui lòng kiểm tra kết nối.';
                 });
             }
 
-
-            // --- HÀM HỖ TRỢ (Giữ nguyên) ---
+            // --- CÁC HÀM HỖ TRỢ (Admin) ---
             function resetForm() {
                 nameInput.value = '';
                 phoneInput.value = '';
@@ -248,368 +371,212 @@
                 onConfirmAction = () => {};
             }
 
-            confirmCancelBtn.addEventListener('click', hideConfirmationModal);
-            confirmOkBtn.addEventListener('click', () => {
-                onConfirmAction();
-                hideConfirmationModal();
-            });
-            confirmModalOverlay.addEventListener('click', (e) => {
-                if (e.target === confirmModalOverlay) {
+            // --- KHỞI TẠO APP ADMIN (Chỉ chạy 1 lần) ---
+            function initializeAdminApp() {
+                if (isAdminAppInitialized) return; 
+                console.log("Initializing Admin App Logic...");
+
+                // Bắt đầu lắng nghe
+                startRealtimeListener();
+
+                // Gắn sự kiện (chỉ 1 lần)
+                confirmCancelBtn.addEventListener('click', hideConfirmationModal);
+                confirmOkBtn.addEventListener('click', () => {
+                    onConfirmAction();
                     hideConfirmationModal();
-                }
-            });
-            formCancelBtn.addEventListener('click', resetForm);
+                });
+                confirmModalOverlay.addEventListener('click', (e) => {
+                    if (e.target === confirmModalOverlay) hideConfirmationModal();
+                });
+                formCancelBtn.addEventListener('click', resetForm);
 
-            
-            // --- XỬ LÝ SỰ KIỆN CHÍNH (CẬP NHẬT VỚI FIREBASE) ---
-
-            // MỚI: Xử lý Đăng nhập
-            loginForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const email = loginEmail.value;
-                const password = loginPassword.value;
-                loginError.textContent = '';
-                
-                try {
-                    await signInWithEmailAndPassword(auth, email, password);
-                    // onAuthStateChanged sẽ tự động xử lý việc hiển thị app
-                } catch (error) {
-                    console.error('Login error:', error);
-                    loginError.textContent = 'Đăng nhập thất bại. Vui lòng kiểm tra Email/Password.';
-                }
-            });
-
-            // MỚI: Xử lý Đăng xuất
-            logoutBtn.addEventListener('click', async () => {
-                try {
-                    await signOut(auth);
-                    // onAuthStateChanged sẽ tự động xử lý việc hiển thị login
-                } catch (error) {
-                    console.error('Logout error:', error);
-                }
-            });
-
-
-            // 1. Thêm (hoặc Sửa) thành viên
-            addBtn.addEventListener('click', async () => {
-                if (!db) return alert('Database chưa sẵn sàng, vui lòng chờ...');
-                
-                const name = nameInput.value.trim();
-                const phone = phoneInput.value.trim();
-                const dob = dobInput.value.trim();
-
-                if (!name) {
-                    alert('Vui lòng nhập Tên thành viên.');
-                    return;
-                }
-                
-                addBtn.disabled = true; 
-                
-                try {
-                    if (editingMemberId) {
-                        const docRef = doc(db, membersCollectionRef.path, editingMemberId);
-                        await updateDoc(docRef, {
-                            name: name,
-                            phone: phone,
-                            dob: dob
-                        });
-                        console.log("Member updated!");
-                        
-                    } else {
-                        const memberCode = Math.floor(100000 + Math.random() * 900000).toString();
-                        
-                        const newMemberData = {
-                            name: name,
-                            phone: phone,
-                            dob: dob,
-                            points: 0,
-                            memberCode: memberCode,
-                            createdAt: Date.now() 
-                        };
-                        
-                        await addDoc(membersCollectionRef, newMemberData);
-                        console.log("New member added!");
-                    }
-                    resetForm(); 
-
-                } catch (error) {
-                    console.error("Error saving member: ", error);
-                    alert("Đã xảy ra lỗi khi lưu: " + error.message);
-                } finally {
-                    addBtn.disabled = false;
-                }
-            });
-
-            // 2. Xử lý các nút trên từng thành viên
-            memberList.addEventListener('click', async (e) => {
-                if (!db) return alert('Database chưa sẵn sàng, vui lòng chờ...');
-                
-                const target = e.target.closest('.btn-sm');
-                if (!target) return;
-
-                const action = target.dataset.action;
-                const memberRow = target.closest('tr');
-                const id = memberRow.dataset.id; 
-                
-                const member = localMembers.find(m => m.id === id);
-                if (!member) return;
-                
-                const docRef = doc(db, membersCollectionRef.path, id);
-
-                switch (action) {
-                    case 'edit':
-                        nameInput.value = member.name;
-                        phoneInput.value = member.phone || '';
-                        dobInput.value = member.dob || '';
-                        editingMemberId = member.id;
-                        addBtn.textContent = 'Lưu Thay Đổi';
-                        addBtn.classList.remove('btn-primary');
-                        addBtn.classList.add('btn-success');
-                        formCancelBtn.style.display = 'block';
-                        window.scrollTo({ top: 0, behavior: 'smooth' });
-                        nameInput.focus();
-                        break;
-                    case 'add':
-                        showConfirmationModal(
-                            'Xác nhận cộng 1 điểm',
-                            `Bạn có chắc muốn cộng <strong>1 điểm</strong> cho <strong>${member.name}</strong>?`,
-                            async () => {
-                                try {
-                                    await updateDoc(docRef, {
-                                        points: (member.points || 0) + 1
-                                    });
-                                } catch (error) {
-                                    console.error("Error adding point: ", error);
-                                    alert("Lỗi khi cộng điểm: " + error.message);
-                                }
-                            }
-                        );
-                        break;
-                    case 'subtract':
-                        if ((member.points || 0) === 0) {
-                            alert('Điểm của thành viên đã là 0!');
-                            return;
-                        }
-                        showConfirmationModal(
-                            'Xác nhận trừ 1 điểm',
-                            `Bạn có chắc muốn trừ <strong>1 điểm</strong> của <strong>${member.name}</strong>?`,
-                            async () => {
-                                try {
-                                    await updateDoc(docRef, {
-                                        points: Math.max(0, (member.points || 0) - 1)
-                                    });
-                                } catch (error) {
-                                    console.error("Error subtracting point: ", error);
-                                    alert("Lỗi khi trừ điểm: " + error.message);
-                                }
-                            }
-                        );
-                        break;
-                    case 'delete':
-                        showConfirmationModal(
-                            'Xác nhận xóa thành viên',
-                            `Bạn có chắc muốn XÓA vĩnh viễn <strong>${member.name}</strong>?`,
-                            async () => {
-                                try {
-                                    await deleteDoc(docRef);
-                                } catch (error) {
-                                    console.error("Error deleting member: ", error);
-                                    alert("Lỗi khi xóa: " + error.message);
-                                }
-                            },
-                            true
-                        );
-                        break;
-                    case 'qr':
-                        const qrContent = `${slugify(member.name)}|${member.phone || ''}|${member.memberCode}|${member.points}`;
-                        qrCodeContainer.innerHTML = '';
-                        new QRCode(qrCodeContainer, {
-                            text: qrContent,
-                            width: 220,
-                            height: 220,
-                            correctLevel : QRCode.CorrectLevel.H
-                        });
-                        qrText.textContent = qrContent;
-                        qrModal.style.display = 'flex';
-                        break;
-                }
-            });
-
-            // 3. Đóng Modal QR (Giữ nguyên)
-            modalCloseBtn.addEventListener('click', () => {
-                qrModal.style.display = 'none';
-            });
-            window.addEventListener('click', (e) => {
-                if (e.target === qrModal) {
-                    qrModal.style.display = 'none';
-                }
-            });
-
-            // 4. Xóa tất cả thành viên
-            deleteAllBtn.addEventListener('click', () => {
-                if (!db) return alert('Database chưa sẵn sàng, vui lòng chờ...');
-                
-                showConfirmationModal(
-                    'Xác nhận Xóa Tất Cả',
-                    `CẢNH BÁO: Bạn có chắc muốn <strong>XÓA TẤT CẢ</strong> ${localMembers.length} thành viên? Hành động này không thể hoàn tác.`,
-                    async () => {
-                        deleteAllBtn.disabled = true;
-                        deleteAllBtn.textContent = 'Đang xóa...';
-                        try {
-                            const batch = writeBatch(db);
-                            localMembers.forEach(member => {
-                                const docRef = doc(db, membersCollectionRef.path, member.id);
-                                batch.delete(docRef);
+                // 1. Thêm (hoặc Sửa) thành viên
+                addBtn.addEventListener('click', async () => {
+                    const name = nameInput.value.trim();
+                    const phone = phoneInput.value.trim();
+                    const dob = dobInput.value.trim();
+                    if (!name) return alert('Vui lòng nhập Tên thành viên.');
+                    
+                    addBtn.disabled = true; 
+                    try {
+                        if (editingMemberId) {
+                            const docRef = doc(db, membersCollectionRef.path, editingMemberId);
+                            await updateDoc(docRef, { name: name, phone: phone, dob: dob });
+                        } else {
+                            const memberCode = Math.floor(100000 + Math.random() * 900000).toString();
+                            await addDoc(membersCollectionRef, {
+                                name: name, phone: phone, dob: dob, points: 0,
+                                memberCode: memberCode, createdAt: Date.now() 
                             });
-                            await batch.commit();
-                            console.log("All members deleted!");
-                        } catch (error) {
-                            console.error("Error deleting all members: ", error);
-                            alert("Lỗi khi xóa tất cả: " + error.message);
-                        } finally {
-                            deleteAllBtn.disabled = false;
-                            deleteAllBtn.textContent = 'Xóa Tất Cả';
                         }
-                    },
-                    true
-                );
-            });
+                        resetForm(); 
+                    } catch (error) {
+                        console.error("Error saving member: ", error);
+                    } finally {
+                        addBtn.disabled = false;
+                    }
+                });
 
-            // 5. Xuất Excel (Giữ nguyên)
-            exportBtn.addEventListener('click', () => {
-                if (localMembers.length === 0) {
-                    alert('Không có dữ liệu để xuất.');
-                    return;
-                }
-                
-                const dataToExport = localMembers.map(m => ({
-                    'Tên': m.name,
-                    'Số điện thoại': m.phone,
-                    'Năm sinh': m.dob,
-                    'Mã số': m.memberCode,
-                    'Điểm': m.points
-                }));
+                // 2. Xử lý các nút trên từng thành viên
+                memberList.addEventListener('click', async (e) => {
+                    const target = e.target.closest('.btn-sm');
+                    if (!target) return;
+                    const action = target.dataset.action;
+                    const memberRow = target.closest('tr');
+                    const id = memberRow.dataset.id; 
+                    const member = localMembers.find(m => m.id === id);
+                    if (!member) return;
+                    const docRef = doc(db, membersCollectionRef.path, id);
 
-                const ws = XLSX.utils.json_to_sheet(dataToExport);
-                const wb = XLSX.utils.book_new();
-                XLSX.utils.book_append_sheet(wb, ws, 'DanhSachThanhVien');
-                XLSX.writeFile(wb, 'DanhSachThanhVien.xlsx');
-            });
-            
-            // 6. Tìm kiếm (Giữ nguyên)
-            function handleSearch() {
-                const searchTerm = searchInput.value.toLowerCase().trim();
-                if (!searchTerm) {
-                    renderMembers(localMembers);
-                    return;
-                }
-                
-                const filteredMembers = localMembers.filter(m => {
-                    return (m.name && m.name.toLowerCase().includes(searchTerm)) ||
-                           (m.phone && m.phone.includes(searchTerm)) ||
-                           (m.memberCode && m.memberCode.includes(searchTerm));
+                    switch (action) {
+                        case 'edit':
+                            nameInput.value = member.name;
+                            phoneInput.value = member.phone || '';
+                            dobInput.value = member.dob || '';
+                            editingMemberId = member.id;
+                            addBtn.textContent = 'Lưu Thay Đổi';
+                            addBtn.classList.remove('btn-primary');
+                            addBtn.classList.add('btn-success');
+                            formCancelBtn.style.display = 'block';
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                            nameInput.focus();
+                            break;
+                        case 'add':
+                            showConfirmationModal(
+                                'Xác nhận cộng 1 điểm',
+                                `Bạn có chắc muốn cộng <strong>1 điểm</strong> cho <strong>${member.name}</strong>?`,
+                                async () => {
+                                    await updateDoc(docRef, { points: (member.points || 0) + 1 });
+                                }
+                            );
+                            break;
+                        case 'subtract':
+                            if ((member.points || 0) === 0) return alert('Điểm của thành viên đã là 0!');
+                            showConfirmationModal(
+                                'Xác nhận trừ 1 điểm',
+                                `Bạn có chắc muốn trừ <strong>1 điểm</strong> của <strong>${member.name}</strong>?`,
+                                async () => {
+                                    await updateDoc(docRef, { points: Math.max(0, (member.points || 0) - 1) });
+                                }
+                            );
+                            break;
+                        case 'delete':
+                            showConfirmationModal(
+                                'Xác nhận xóa thành viên',
+                                `Bạn có chắc muốn XÓA vĩnh viễn <strong>${member.name}</strong>?`,
+                                async () => {
+                                    await deleteDoc(docRef);
+                                },
+                                true
+                            );
+                            break;
+                        case 'qr':
+                            const qrContent = `${slugify(member.name)}|${member.phone || ''}|${member.memberCode}|${member.points}`;
+                            qrCodeContainer.innerHTML = '';
+                            new QRCode(qrCodeContainer, {
+                                text: qrContent, width: 220, height: 220,
+                                correctLevel : QRCode.CorrectLevel.H
+                            });
+                            qrText.textContent = qrContent;
+                            qrModal.style.display = 'flex';
+                            break;
+                    }
+                });
+
+                // 3. Đóng Modal QR
+                modalCloseBtn.addEventListener('click', () => qrModal.style.display = 'none');
+                window.addEventListener('click', (e) => {
+                    if (e.target === qrModal) qrModal.style.display = 'none';
+                });
+
+                // 4. Xóa tất cả thành viên
+                deleteAllBtn.addEventListener('click', () => {
+                    showConfirmationModal(
+                        'Xác nhận Xóa Tất Cả',
+                        `CẢNH BÁO: Bạn có chắc muốn <strong>XÓA TẤT CẢ</strong> ${localMembers.length} thành viên?`,
+                        async () => {
+                            deleteAllBtn.disabled = true;
+                            deleteAllBtn.textContent = 'Đang xóa...';
+                            try {
+                                const batch = writeBatch(db);
+                                localMembers.forEach(member => {
+                                    const docRef = doc(db, membersCollectionRef.path, member.id);
+                                    batch.delete(docRef);
+                                });
+                                await batch.commit();
+                            } catch (error) { console.error("Error deleting all members: ", error);
+                            } finally {
+                                deleteAllBtn.disabled = false;
+                                deleteAllBtn.textContent = 'Xóa Tất Cả';
+                            }
+                        },
+                        true
+                    );
+                });
+
+                // 5. Xuất Excel
+                exportBtn.addEventListener('click', () => {
+                    if (localMembers.length === 0) return alert('Không có dữ liệu để xuất.');
+                    const dataToExport = localMembers.map(m => ({
+                        'Tên': m.name, 'Số điện thoại': m.phone, 'Năm sinh': m.dob,
+                        'Mã số': m.memberCode, 'Điểm': m.points
+                    }));
+                    const ws = XLSX.utils.json_to_sheet(dataToExport);
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, 'DanhSachThanhVien');
+                    XLSX.writeFile(wb, 'DanhSachThanhVien.xlsx');
                 });
                 
-                renderMembers(filteredMembers);
+                // 6. Tìm kiếm (Admin)
+                function handleSearch() {
+                    const searchTerm = searchInput.value.toLowerCase().trim();
+                    if (!searchTerm) {
+                        renderMembers(localMembers); return;
+                    }
+                    const filteredMembers = localMembers.filter(m => {
+                        return (m.name && m.name.toLowerCase().includes(searchTerm)) ||
+                               (m.phone && m.phone.includes(searchTerm)) ||
+                               (m.memberCode && m.memberCode.includes(searchTerm));
+                    });
+                    renderMembers(filteredMembers);
+                }
+                
+                searchBtn.addEventListener('click', handleSearch);
+                searchInput.addEventListener('keyup', (e) => {
+                    if (e.key === 'Enter') handleSearch();
+                    if(searchInput.value.trim() === '') handleSearch();
+                });
+
+                // 7. Đăng xuất
+                adminLogoutBtn.addEventListener('click', async () => {
+                    await signOut(auth);
+                });
+
+                isAdminAppInitialized = true; // Đánh dấu đã khởi tạo
             }
             
-            searchBtn.addEventListener('click', handleSearch);
-            searchInput.addEventListener('keyup', (e) => {
-                if (e.key === 'Enter') {
-                    handleSearch();
-                }
-                if(searchInput.value.trim() === '') {
-                    handleSearch();
+            // --- XỬ LÝ ĐĂNG NHẬP (Admin) ---
+            adminLoginForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const email = adminLoginEmail.value;
+                const password = adminLoginPassword.value;
+                adminLoginError.textContent = '';
+                try {
+                    await signInWithEmailAndPassword(auth, email, password);
+                    // onAuthStateChanged sẽ tự động xử lý
+                } catch (error) {
+                    console.error('Login error:', error);
+                    adminLoginError.textContent = 'Đăng nhập thất bại. Vui lòng kiểm tra Email/Password.';
                 }
             });
 
-            // === KHỞI CHẠY FIREBASE ===
-            await initializeFirebase();
+            // === Bắt đầu: Hiển thị màn hình chọn vai trò ===
+            showScreen(roleScreen);
         });
     </script>
     
     <style>
-        /* === CSS MÀN HÌNH ĐĂNG NHẬP (MỚI) === */
-        #login-overlay {
-            display: flex; /* Hiển thị ban đầu */
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            position: fixed;
-            z-index: 3000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #f4f7f6;
-        }
-        #login-form {
-            background-color: #fff;
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
-            width: 90%;
-            max-width: 400px;
-        }
-        #login-form h1 {
-            text-align: center;
-            font-size: 1.8rem;
-            margin-top: 0;
-            margin-bottom: 25px;
-        }
-        #login-form .form-group {
-            margin-bottom: 20px;
-        }
-        #login-form label {
-            font-weight: 500;
-        }
-        #login-form input {
-            width: 100%;
-            box-sizing: border-box; /* Fix lỗi padding */
-        }
-        #login-error {
-            color: #e74c3c;
-            text-align: center;
-            margin-top: 15px;
-            min-height: 1.2em;
-        }
-        #login-form .btn-primary {
-            width: 100%;
-        }
-
-        /* Ẩn app container ban đầu */
-        #app-container {
-            display: none;
-        }
-        
-        /* === CSS THANH HEADER ĐĂNG XUẤT (MỚI) === */
-        .app-header {
-            background-color: #fff;
-            padding: 10px 20px;
-            border-radius: 12px;
-            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.07);
-            margin-bottom: 24px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .app-header span {
-            font-size: 0.9rem;
-            color: #555;
-        }
-        .app-header strong {
-            color: #2c3e50;
-        }
-        .app-header .btn-logout {
-            padding: 8px 14px;
-            font-size: 0.9rem;
-            background-color: #e74c3c;
-            color: white;
-        }
-        /* === KẾT THÚC CSS MỚI === */
-
-
-        /* CSS cho giao diện (giữ nguyên) */
+        /* === CÀI ĐẶT CHUNG === */
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background-color: #f4f7f6;
@@ -617,19 +584,10 @@
             margin: 0;
             padding: 24px;
         }
-
         .container {
             max-width: 1000px;
             margin: 0 auto;
         }
-
-        h1 {
-            text-align: center;
-            color: #2c3e50;
-            margin-bottom: 32px;
-            font-size: 2.25rem;
-        }
-
         .card {
             background-color: #ffffff;
             border-radius: 12px;
@@ -637,7 +595,12 @@
             padding: 24px 30px;
             margin-bottom: 24px;
         }
-
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 32px;
+            font-size: 2.25rem;
+        }
         h2 {
             font-size: 1.5rem;
             color: #34495e;
@@ -646,49 +609,21 @@
             padding-bottom: 10px;
             border-bottom: 1px solid #ecf0f1;
         }
-
-        .add-member-form {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr 200px;
-            gap: 16px;
-            align-items: flex-end;
-        }
-
-        .form-group.button-group {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            height: 100%;
-            justify-content: flex-end;
-        }
-        .form-group.button-group .btn {
-            width: 100%;
-            height: 45px;
-        }
-
-
         .form-group {
             display: flex;
             flex-direction: column;
         }
-
         .form-group label {
             font-size: 0.875rem;
             color: #555;
             margin-bottom: 6px;
         }
-
         .form-group input {
             padding: 12px 14px;
             border: 1px solid #ddd;
             border-radius: 8px;
             font-size: 1rem;
         }
-        
-        .form-group input::placeholder {
-            color: #aaa;
-        }
-
         .btn {
             padding: 12px 20px;
             border: none;
@@ -703,7 +638,6 @@
             background-color: #bdc3c7;
             cursor: not-allowed;
         }
-
         .btn-primary {
             background-color: #3498db;
             color: white;
@@ -711,346 +645,341 @@
         }
         .btn-primary:hover { background-color: #2980b9; }
 
-        .btn-success {
+        /* === CÁC MÀN HÌNH (SCREEN) === */
+        .screen {
+            display: none; /* Ẩn theo mặc định */
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            min-height: calc(100vh - 48px); /* Full height trừ padding */
+        }
+        
+        /* === MÀN HÌNH CHỌN VAI TRÒ === */
+        #role-selection-screen {
+            display: flex; /* Hiển thị đầu tiên */
+        }
+        .role-selection-box {
+            background-color: #fff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .role-selection-box h1 {
+            font-size: 1.8rem;
+            margin-top: 0;
+            margin-bottom: 30px;
+        }
+        .role-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .btn-role {
+            padding: 20px 40px;
+            font-size: 1.2rem;
+            font-weight: 600;
+        }
+        .btn-role-member {
             background-color: #27ae60;
             color: white;
         }
-        .btn-success:hover { background-color: #229954; }
-
-        .btn-danger {
+        .btn-role-member:hover { background-color: #229954; }
+        .btn-role-admin {
             background-color: #e74c3c;
             color: white;
         }
-        .btn-danger:hover { background-color: #c0392b; }
-
-        .list-controls {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
-
-        .search-area {
-            display: flex;
-            gap: 8px;
-            flex-grow: 1;
-            max-width: 450px;
-        }
-
-        .search-area input {
-            flex-grow: 1;
-            padding: 12px 14px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            font-size: 1rem;
-        }
-
-        .action-buttons {
-            display: flex;
-            gap: 12px;
-        }
-
-        .member-list-container {
-            margin-top: 24px;
-            overflow-x: auto;
-        }
-
-        .member-table {
+        .btn-role-admin:hover { background-color: #c0392b; }
+        
+        /* Nút quay lại (Chung) */
+        .back-button-container {
             width: 100%;
-            border-collapse: collapse;
+            max-width: 500px; /* Giống màn hình tra cứu */
+            margin-bottom: 16px;
+        }
+        .btn-back-to-role {
+            background: none;
+            border: none;
+            color: #3498db;
+            font-weight: 500;
+            cursor: pointer;
+            padding: 5px;
+        }
+        .btn-back-to-role:hover { text-decoration: underline; }
+
+        /* === MÀN HÌNH TRA CỨU (MEMBER) === */
+        #member-search-screen .container {
+            max-width: 500px;
+            width: 100%;
+        }
+        /* CSS cho card kết quả */
+        #member-results-card { display: none; }
+        .member-card {
+            background-color: #fafafa; border: 1px solid #eee;
+            border-radius: 8px; padding: 20px; margin-bottom: 15px;
+        }
+        .member-card h3 { margin-top: 0; color: #2c3e50; }
+        .member-card p { margin: 8px 0; color: #555; }
+        .points-display {
+            margin-top: 15px; padding-top: 15px; border-top: 1px dashed #ddd;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .points-display span { font-size: 1.1rem; font-weight: 500; color: #34495e; }
+        .points-display strong { font-size: 1.8rem; color: #27ae60; }
+        .no-results { text-align: center; color: #7f8c8d; font-size: 1.1rem; }
+        .error { color: #e74c3c; font-weight: 500; text-align: center; }
+        #member-loading-indicator { display: none; text-align: center; color: #888; margin-top: 20px; }
+
+
+        /* === MÀN HÌNH ĐĂNG NHẬP (ADMIN LOGIN) === */
+        #admin-login-screen .container {
+            max-width: 450px;
+            width: 100%;
+        }
+        #admin-login-form {
+            background-color: #fff;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+            width: 100%;
+        }
+        #admin-login-form h1 {
+            text-align: center; font-size: 1.8rem;
+            margin-top: 0; margin-bottom: 25px;
+        }
+        #admin-login-form .form-group { margin-bottom: 20px; }
+        #admin-login-form input { width: 100%; box-sizing: border-box; }
+        #admin-login-error {
+            color: #e74c3c; text-align: center;
+            margin-top: 15px; min-height: 1.2em;
+        }
+        #admin-login-form .btn-primary { width: 100%; }
+        
+        /* === MÀN HÌNH ỨNG DỤNG (ADMIN APP) === */
+        #admin-app-screen {
+            justify-content: flex-start; /* Không căn giữa theo chiều dọc */
+            min-height: auto;
+        }
+        #admin-app-screen .container {
+            width: 100%;
+        }
+        .app-header {
+            background-color: #fff; padding: 10px 20px; border-radius: 12px;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.07); margin-bottom: 24px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .app-header span { font-size: 0.9rem; color: #555; }
+        .app-header strong { color: #2c3e50; }
+        .app-header .btn-logout {
+            padding: 8px 14px; font-size: 0.9rem;
+            background-color: #e74c3c; color: white;
         }
 
+        /* === CSS GỐC CỦA ADMIN APP (Giữ nguyên) === */
+        .add-member-form {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 200px;
+            gap: 16px;
+            align-items: flex-end;
+        }
+        .form-group.button-group {
+            display: flex; flex-direction: column;
+            gap: 8px; height: 100%; justify-content: flex-end;
+        }
+        .form-group.button-group .btn { width: 100%; height: 45px; }
+        .btn-success { background-color: #27ae60; color: white; }
+        .btn-success:hover { background-color: #229954; }
+        .btn-danger { background-color: #e74c3c; color: white; }
+        .btn-danger:hover { background-color: #c0392b; }
+        .list-controls {
+            display: flex; justify-content: space-between;
+            align-items: center; flex-wrap: wrap; gap: 16px;
+        }
+        .search-area { display: flex; gap: 8px; flex-grow: 1; max-width: 450px; }
+        .search-area input {
+            flex-grow: 1; padding: 12px 14px; border: 1px solid #ddd;
+            border-radius: 8px; font-size: 1rem;
+        }
+        .action-buttons { display: flex; gap: 12px; }
+        .member-list-container { margin-top: 24px; overflow-x: auto; }
+        .member-table { width: 100%; border-collapse: collapse; }
         .member-table th, .member-table td {
-            padding: 14px 12px;
-            text-align: left;
+            padding: 14px 12px; text-align: left;
             border-bottom: 1px solid #ecf0f1;
         }
-
         .member-table th {
-            font-size: 0.875rem;
-            color: #7f8c8d;
-            text-transform: uppercase;
-            background-color: #fcfcfc;
+            font-size: 0.875rem; color: #7f8c8d;
+            text-transform: uppercase; background-color: #fcfcfc;
         }
-
-        .member-table tr:last-child td {
-            border-bottom: none;
-        }
-
-        .member-table tr:hover {
-            background-color: #f9f9f9;
-        }
-
-        .member-id {
-            font-family: 'Courier New', Courier, monospace;
-            color: #8e44ad;
-            font-weight: 600;
-        }
-
-        .member-points {
-            font-weight: 700;
-            font-size: 1.1rem;
-            color: #2980b9;
-        }
-
+        .member-table tr:last-child td { border-bottom: none; }
+        .member-table tr:hover { background-color: #f9f9f9; }
+        .member-id { font-family: 'Courier New', Courier, monospace; color: #8e44ad; font-weight: 600; }
+        .member-points { font-weight: 700; font-size: 1.1rem; color: #2980b9; }
         .member-actions .btn-sm {
-            padding: 6px 10px;
-            font-size: 0.875rem;
-            margin-right: 6px;
-            border-radius: 6px;
-            border: 1px solid transparent; 
-            font-weight: 500;
+            padding: 6px 10px; font-size: 0.875rem; margin-right: 6px;
+            border-radius: 6px; border: 1px solid transparent; font-weight: 500;
         }
-
-        .btn-add { 
-            background-color: #e6f7ec; 
-            color: #27ae60; 
-            border-color: #a7d7b9;
-        }
+        .btn-add { background-color: #e6f7ec; color: #27ae60; border-color: #a7d7b9; }
         .btn-add:hover { background-color: #d8f1e0; }
-
-        .btn-subtract { 
-            background-color: #fef6e6; 
-            color: #f39c12; 
-            border-color: #fbe5b1;
-        }
+        .btn-subtract { background-color: #fef6e6; color: #f39c12; border-color: #fbe5b1; }
         .btn-subtract:hover { background-color: #fdedd2; }
-
-        .btn-qr { 
-            background-color: #e7f5fe; 
-            color: #3498db; 
-            border-color: #b4e0fa;
-        }
+        .btn-qr { background-color: #e7f5fe; color: #3498db; border-color: #b4e0fa; }
         .btn-qr:hover { background-color: #d8eefd; }
-
-        .btn-delete { 
-            background-color: #fdedec; 
-            color: #e74c3c; 
-            border-color: #f8c9c5;
-        }
+        .btn-delete { background-color: #fdedec; color: #e74c3c; border-color: #f8c9c5; }
         .btn-delete:hover { background-color: #fbe0dd; }
-
         .btn-edit {
-            background-color: #e7f5fe; 
-            color: #3498db; 
-            border-color: #b4e0fa;
-            padding: 6px; 
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
+            background-color: #e7f5fe; color: #3498db; border-color: #b4e0fa;
+            padding: 6px; display: inline-flex; align-items: center; justify-content: center;
         }
         .btn-edit:hover { background-color: #d8eefd; }
-        .btn-edit svg { 
-            width: 16px;
-            height: 16px;
-        }
+        .btn-edit svg { width: 16px; height: 16px; }
 
+        /* === MODAL (Chung) === */
         .modal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.6);
-            justify-content: center;
-            align-items: center;
+            display: none; position: fixed; z-index: 1000; left: 0; top: 0;
+            width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.6);
+            justify-content: center; align-items: center;
         }
         .modal-content {
-            background-color: #fff;
-            padding: 30px 40px;
-            border-radius: 12px;
-            text-align: center;
-            position: relative;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            background-color: #fff; padding: 30px 40px; border-radius: 12px;
+            text-align: center; position: relative; box-shadow: 0 10px 25px rgba(0,0,0,0.2);
         }
         .modal-close {
-            position: absolute;
-            top: 10px;
-            right: 20px;
-            font-size: 32px;
-            font-weight: bold;
-            color: #aaa;
-            cursor: pointer;
+            position: absolute; top: 10px; right: 20px; font-size: 32px;
+            font-weight: bold; color: #aaa; cursor: pointer;
         }
         .modal-close:hover { color: #333; }
         #qr-code-container {
-            padding: 20px;
-            margin-bottom: 15px;
-            background-color: #fff;
-            border: 1px solid #eee;
-            border-radius: 8px;
-            display: inline-block;
+            padding: 20px; margin-bottom: 15px; background-color: #fff;
+            border: 1px solid #eee; border-radius: 8px; display: inline-block;
         }
         #qr-text {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 1rem;
-            color: #555;
-            background-color: #f5f5f5;
-            padding: 10px;
-            border-radius: 4px;
-            word-break: break-all;
-            max-width: 300px;
-            margin: 0 auto;
+            font-family: 'Courier New', Courier, monospace; font-size: 1rem; color: #555;
+            background-color: #f5f5f5; padding: 10px; border-radius: 4px;
+            word-break: break-all; max-width: 300px; margin: 0 auto;
         }
-
         #loading-message {
-            text-align: center;
-            color: #888;
-            font-size: 1.1rem;
-            padding: 40px;
+            text-align: center; color: #888; font-size: 1.1rem; padding: 40px;
         }
-        
         .confirm-modal-overlay {
-            display: none; 
-            position: fixed;
-            z-index: 2000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.6);
-            justify-content: center;
-            align-items: center;
+            display: none; position: fixed; z-index: 2000; left: 0; top: 0;
+            width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.6);
+            justify-content: center; align-items: center;
         }
-        
         .confirm-modal {
-            background-color: #fff;
-            border-radius: 12px;
-            padding: 30px;
-            width: 90%;
-            max-width: 420px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            background-color: #fff; border-radius: 12px; padding: 30px;
+            width: 90%; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);
             text-align: left;
         }
-        
-        .confirm-modal h3 {
-            font-size: 1.5rem;
-            color: #2c3e50;
-            margin-top: 0;
-            margin-bottom: 15px;
-        }
-        
-        .confirm-modal p {
-            font-size: 1.1rem;
-            color: #34495e;
-            line-height: 1.6;
-            margin-bottom: 25px;
-        }
-        
-        .confirm-modal p strong {
-            color: #2c3e50;
-        }
-        
-        .confirm-modal-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 12px;
-        }
-        
+        .confirm-modal h3 { font-size: 1.5rem; color: #2c3e50; margin-top: 0; margin-bottom: 15px; }
+        .confirm-modal p { font-size: 1.1rem; color: #34495e; line-height: 1.6; margin-bottom: 25px; }
+        .confirm-modal p strong { color: #2c3e50; }
+        .confirm-modal-actions { display: flex; justify-content: flex-end; gap: 12px; }
         .confirm-btn {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 1rem;
-            font-weight: 500;
-            transition: all 0.3s ease;
+            padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer;
+            font-size: 1rem; font-weight: 500; transition: all 0.3s ease;
         }
-        
-        .btn-confirm-cancel {
-            background-color: #ecf0f1;
-            color: #7f8c8d;
-        }
+        .btn-confirm-cancel { background-color: #ecf0f1; color: #7f8c8d; }
         .btn-confirm-cancel:hover { background-color: #e0e6e8; }
-        
-        .btn-confirm-ok {
-            background-color: #27ae60;
-            color: white;
-        }
+        .btn-confirm-ok { background-color: #27ae60; color: white; }
         .btn-confirm-ok:hover { background-color: #229954; }
-        
-        .btn-confirm-ok.danger {
-            background-color: #e74c3c;
-        }
+        .btn-confirm-ok.danger { background-color: #e74c3c; }
         .btn-confirm-ok.danger:hover { background-color: #c0392b; }
 
-
         @media (max-width: 768px) {
-            body {
-                padding: 12px;
-            }
-            .card {
-                padding: 20px;
-            }
-            .list-controls, .action-buttons {
-                flex-direction: column;
-                align-items: stretch;
-            }
-            .search-area {
-                width: 100%;
-                max-width: none;
-            }
-            .btn {
-                width: 100%;
-            }
-            .member-table {
-                font-size: 0.9rem;
-            }
-            .member-table th, .member-table td {
-                padding: 10px 8px;
-            }
-            .member-actions .btn-sm {
-                display: block;
-                margin-bottom: 5px;
-                text-align: center;
-            }
-            .confirm-modal {
-                padding: 20px;
-            }
+            body { padding: 12px; }
+            .card { padding: 20px; }
+            .add-member-form { grid-template-columns: 1fr; }
+            .form-group.button-group { align-items: stretch; }
+            .list-controls, .action-buttons { flex-direction: column; align-items: stretch; }
+            .search-area { width: 100%; max-width: none; }
+            .btn { width: 100%; box-sizing: border-box; }
+            .member-table { font-size: 0.9rem; }
+            .member-table th, .member-table td { padding: 10px 8px; }
+            .member-actions .btn-sm { display: block; margin-bottom: 5px; text-align: center; }
+            .confirm-modal { padding: 20px; }
             .confirm-modal h3 { font-size: 1.25rem; }
             .confirm-modal p { font-size: 1rem; }
-            
-            #login-form {
-                padding: 30px 25px;
-            }
+            #admin-login-form { padding: 30px 25px; }
+            .role-selection-box { padding: 30px 25px; width: 90%; }
         }
 
     </style>
 </head>
 <body>
 
-    <!-- MÀN HÌNH ĐĂNG NHẬP (MỚI) -->
-    <div id="login-overlay">
-        <form id="login-form">
-            <h1>Đăng Nhập Quản Trị</h1>
-            <div class="form-group">
-                <label for="login-email">Email</label>
-                <input type="email" id="login-email" required>
+    <!-- MÀN HÌNH 1: CHỌN VAI TRÒ (Mặc định) -->
+    <div id="role-selection-screen" class="screen">
+        <div class="role-selection-box">
+            <h1>Bạn là...</h1>
+            <div class="role-buttons">
+                <button id="role-btn-member" class="btn btn-role btn-role-member">Thành Viên Tra Cứu Điểm</button>
+                <button id="role-btn-admin" class="btn btn-role btn-role-admin">Quản Trị Viên</button>
             </div>
-            <div class="form-group">
-                <label for="login-password">Mật khẩu</label>
-                <input type="password" id="login-password" required>
-            </div>
-            <p id="login-error"></p>
-            <button type"submit" class="btn btn-primary">Đăng Nhập</button>
-        </form>
+        </div>
     </div>
 
-    <!-- NỘI DUNG APP (ĐÃ ẨN) -->
-    <div id="app-container">
+    <!-- MÀN HÌNH 2: TRA CỨU THÀNH VIÊN -->
+    <div id="member-search-screen" class="screen">
         <div class="container">
-            <!-- THANH HEADER (MỚI) -->
+            <div class="back-button-container">
+                <button class="btn-back-to-role">&larr; Quay lại</button>
+            </div>
+            <h1>Tra Cứu Điểm Thưởng</h1>
+            <div class="card">
+                <div class="search-form">
+                    <div class="form-group">
+                        <label for="member-search-input">SĐT hoặc Mã số thành viên</label>
+                        <input type="text" id="member-search-input" placeholder="Nhập SĐT hoặc Mã số..." required>
+                    </div>
+                    <button id="member-search-btn" class="btn btn-primary">Tra Cứu</button>
+                </div>
+            </div>
+            <div class="card" id="member-results-card">
+                <h2>Kết Quả Tra Cứu</h2>
+                <div id="member-loading-indicator">Đang tìm kiếm...</div>
+                <div id="member-results-container">
+                    <p class="no-results" style="color: #aaa;">Vui lòng nhập thông tin để tra cứu.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MÀN HÌNH 3: ĐĂNG NHẬP QUẢN TRỊ VIÊN -->
+    <div id="admin-login-screen" class="screen">
+        <div class="container">
+            <div class="back-button-container">
+                <button class="btn-back-to-role">&larr; Quay lại</button>
+            </div>
+            <form id="admin-login-form">
+                <h1>Đăng Nhập Quản Trị</h1>
+                <div class="form-group">
+                    <label for="admin-login-email">Email</label>
+                    <input type="email" id="admin-login-email" required>
+                </div>
+                <div class="form-group">
+                    <label for="admin-login-password">Mật khẩu</label>
+                    <input type="password" id="admin-login-password" required>
+                </div>
+                <p id="admin-login-error"></p>
+                <button type="submit" class="btn btn-primary">Đăng Nhập</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MÀN HÌNH 4: ỨNG DỤNG QUẢN TRỊ VIÊN -->
+    <div id="admin-app-screen" class="screen">
+        <div class="container">
+            <!-- THANH HEADER (Admin) -->
             <div class="app-header">
-                <span>Đã đăng nhập với: <strong id="user-email">...</strong></span>
-                <button id="logout-btn" class="btn btn-logout">Đăng Xuất</button>
+                <span>Đã đăng nhập với: <strong id="admin-user-email">...</strong></span>
+                <button id="admin-logout-btn" class="btn btn-logout">Đăng Xuất</button>
             </div>
 
             <!-- Card Thêm Thành Viên -->
             <div class="card">
-                <h2>Thêm thành viên mới</h2>
+                <h2>Thêm / Sửa thành viên</h2>
                 <div class="add-member-form">
                     <div class="form-group">
                         <label for="name">Họ và tên</label>
@@ -1101,7 +1030,7 @@
                         </thead>
                         <tbody id="member-list">
                             <tr>
-                                <td colspan="7" id="loading-message">Đang kết nối với database...</td>
+                                <td colspan="7" id="loading-message">Đang kết nối...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -1110,6 +1039,8 @@
         </div>
     </div>
 
+    <!-- === CÁC MODAL CHUNG === -->
+    
     <!-- Modal hiển thị QR Code -->
     <div id="qr-modal" class="modal">
         <div class="modal-content">
@@ -1119,7 +1050,7 @@
         </div>
     </div>
     
-    <!-- === MODAL XÁC NHẬN === -->
+    <!-- Modal xác nhận -->
     <div id="confirm-modal-overlay" class="confirm-modal-overlay">
         <div class="confirm-modal">
             <h3 id="confirm-title">Tiêu đề xác nhận</h3>
@@ -1133,5 +1064,3 @@
 
 </body>
 </html>
-
-
